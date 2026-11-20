@@ -6,7 +6,9 @@ MOVES = np.array([(-1, 0), (1, 0), (0, -1), (0, 1), (0, 0)])
 class GridWorld:
     
     def __init__(self, grid_size=10, num_agents=4, num_targets=4, max_steps=50,
-                 radius=2, seed=None):
+                 radius=2, seed=None, observation_radius=None):
+        if observation_radius is not None:
+            radius = observation_radius
         # Spec: |targets| = N, T = 50, N = 4 in the main grid.
         assert num_targets == num_agents, "spec requires |Gamma| = N"
         assert num_targets <= grid_size ** 2

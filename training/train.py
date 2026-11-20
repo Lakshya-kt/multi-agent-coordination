@@ -21,9 +21,18 @@ def set_seed(seed):
 
 def _format_obs(raw_obs, env, num_agents):
     """
-    Ensures observations have shape (num_agents, obs_dim) regardless of how
-    Person 1 structures GridWorld.reset() / GridWorld.step() returns.
+    Flatten the (windows, pbar) tuple from GridWorld into a 2-D float array
+    of shape (num_agents, obs_dim) suitable for DQNAgent.
+
+    Handles two return formats:
+      - Tuple (windows, pbar): windows (N, C, W, W) + pbar (N, 2) → concat & flatten
+      - Plain ndarray of shape (N, obs_dim) or ravellable to it
     """
+    if isinstance(raw_obs, tuple) and len(raw_obs) == 2:
+        windows, pbar = raw_obs
+        windows = np.asarray(windows, dtype=np.float32).reshape(num_agents, -1)
+        pbar = np.asarray(pbar, dtype=np.float32).reshape(num_agents, -1)
+        return np.concatenate([windows, pbar], axis=-1)
     arr = np.asarray(raw_obs, dtype=np.float32)
     if arr.ndim == 2 and arr.shape[0] == num_agents:
         return arr
@@ -36,14 +45,14 @@ def train(cfg=None):
 
     set_seed(cfg["seed"])
 
-    # Pass observation_radius if Person 1's GridWorld accepts it; fallback cleanly if not
+    # GridWorld uses 'radius' kwarg; fall back gracefully if the signature changes.
     try:
         env = GridWorld(
             grid_size=cfg["grid_size"],
             num_agents=cfg["num_agents"],
             num_targets=cfg["num_targets"],
             max_steps=cfg["max_steps"],
-            observation_radius=cfg["observation_radius"],
+            radius=cfg["observation_radius"],
         )
     except TypeError:
         env = GridWorld(
@@ -70,6 +79,9 @@ def train(cfg=None):
         lr=cfg["learning_rate"],
         gamma=cfg["gamma"],
         batch_size=cfg["batch_size"],
+        use_memory=cfg.get("use_memory", False),
+        comm_mode=cfg.get("comm_mode", "none"),
+        num_messages=cfg.get("num_messages", 4),
     )
     replay_buffer = ReplayBuffer(capacity=cfg["replay_capacity"])
 
@@ -96,6 +108,9 @@ def train(cfg=None):
         for ep in range(1, cfg["num_episodes"] + 1):
             raw_obs = env.reset()
             obs = _format_obs(raw_obs, env, cfg["num_agents"])
+            agent.reset_hidden()
+            prev_messages = agent.init_messages()
+            episode_transitions = []
 
             ep_return = 0.0
             ep_loss = []
@@ -106,7 +121,8 @@ def train(cfg=None):
                 steps += 1
                 global_step += 1
 
-                actions = agent.select_actions(obs, epsilon=epsilon)
+                actions = agent.select_actions(obs, epsilon=epsilon, prev_messages=prev_messages)
+                current_messages = agent.current_messages
                 step_out = env.step(actions)
 
                 # Support both 4-tuple (obs, reward, done, info) and 3-tuple (obs, reward, done)
@@ -117,13 +133,32 @@ def train(cfg=None):
                     info = {}
 
                 next_obs = _format_obs(raw_next_obs, env, cfg["num_agents"])
-                replay_buffer.add((obs, eye_agents, actions, float(reward), next_obs, bool(done)))
+                transition = (
+                    obs,
+                    eye_agents,
+                    actions,
+                    float(reward),
+                    next_obs,
+                    bool(done),
+                    prev_messages,
+                    current_messages,
+                )
+                replay_buffer.add(transition)
+                if cfg.get("use_memory", False):
+                    episode_transitions.append(transition)
 
                 obs = next_obs
+                prev_messages = current_messages
                 ep_return += float(reward)
 
+                ready_to_train = (
+                    replay_buffer.num_episodes() >= max(4, min(cfg["batch_size"] // 4, 16))
+                    if cfg.get("use_memory", False)
+                    else replay_buffer.len() >= cfg["min_replay_size"]
+                )
+
                 if (
-                    replay_buffer.len() >= cfg["min_replay_size"]
+                    ready_to_train
                     and global_step % cfg["train_frequency"] == 0
                 ):
                     loss = agent.train_step(replay_buffer)
@@ -142,6 +177,11 @@ def train(cfg=None):
                         except Exception:
                             success = 0
                     break
+
+            if cfg.get("use_memory", False):
+                replay_buffer.add_episode(episode_transitions)
+
+            agent.anneal_tau()
 
             epsilon = max(cfg["epsilon_min"], epsilon * cfg["epsilon_decay"])
             recent_returns.append(ep_return)
