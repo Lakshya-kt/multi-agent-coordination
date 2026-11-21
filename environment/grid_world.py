@@ -74,8 +74,8 @@ class GridWorld:
         #coverage after the move : C(s_t+1)
         after=self.get_covered_targets()
         
-        #reward is the number of new targets covered by agents in this step
-        reward=max(after-before,0) -0.01 #penalty for each step to encourage faster coverage
+        # Reward changes in simultaneous coverage, including losing coverage.
+        reward = after - before - 0.01
         if after==self.num_targets:
             reward+=5 #bonus for covering all targets
         

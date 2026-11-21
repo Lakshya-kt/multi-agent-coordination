@@ -115,3 +115,16 @@ def test_completion_reward():
     env.agent_position[:] = [[3, 2], [3, 5]]             # agent 1 already covers a target
     _, rew, done, info = env.step([3, 4])                # agent 0 steps onto the other
     assert done and info["success"] and abs(rew - 5.99) < 1e-9
+
+
+def test_leaving_a_covered_target_is_penalized():
+    env = GridWorld(num_agents=2, num_targets=2, radius=1)
+    env.reset(seed=1)
+    env.target_position[:] = [[3, 3], [3, 5]]
+    env.agent_position[:] = [[3, 3], [0, 0]]
+
+    _, reward, done, info = env.step([3, 4])
+
+    assert reward == -1.01
+    assert not done
+    assert info["covered"] == 0
