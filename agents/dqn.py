@@ -376,7 +376,7 @@ class DQNAgent:
         obs_t = torch.as_tensor(obs_b, device=self.device)           # (B, L, N, obs_dim)
         ids_t = torch.as_tensor(ids_b, device=self.device)           # (B, L, N, N)
         act_t = torch.as_tensor(act_b, device=self.device)           # (B, L, N)
-        rew_t = torch.as_tensor(rew_b, device=self.device)           # (B, L)
+        rew_t = torch.as_tensor(rew_b, device=self.device)           # (B, L) or (B, L, N)
         next_obs_t = torch.as_tensor(next_obs_b, device=self.device) # (B, L, N, obs_dim)
         done_t = torch.as_tensor(done_b, device=self.device)         # (B, L)
         mask_t = torch.as_tensor(mask_b, device=self.device)         # (B, L)
@@ -423,7 +423,15 @@ class DQNAgent:
             next_q_seq, _, _ = self.target_net(next_seq_in)
             next_q_max = next_q_seq.max(dim=-1)[0]           # (B*N, L)
 
-            rew_expanded = rew_t.unsqueeze(1).expand(B, N, L).reshape(B * N, L)
+            if rew_t.ndim == 2:
+                rew_expanded = rew_t.unsqueeze(1).expand(B, N, L).reshape(B * N, L)
+            elif rew_t.shape == (B, L, N):
+                rew_expanded = rew_t.permute(0, 2, 1).reshape(B * N, L)
+            else:
+                raise ValueError(
+                    "Sequence rewards must have shape (B, L) or (B, L, N); "
+                    f"got {tuple(rew_t.shape)}"
+                )
             done_expanded = done_t.unsqueeze(1).expand(B, N, L).reshape(B * N, L)
             td_target = rew_expanded + self.gamma * (1.0 - done_expanded) * next_q_max
 

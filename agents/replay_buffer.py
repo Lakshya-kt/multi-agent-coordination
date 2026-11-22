@@ -71,7 +71,7 @@ class ReplayBuffer:
             obs: (B, L, N, obs_dim)
             agent_ids: (B, L, N, N)
             actions: (B, L, N)
-            rewards: (B, L)
+            rewards: (B, L) for scalar rewards or (B, L, N) for per-agent rewards
             next_obs: (B, L, N, obs_dim)
             dones: (B, L)
             mask: (B, L) with 1.0 for valid steps, 0.0 for padding
@@ -86,11 +86,17 @@ class ReplayBuffer:
 
         N, obs_dim = sample_item[0].shape
         K = sample_item[6].shape[-1] if has_comm else 0
+        reward_shape = np.asarray(sample_item[3]).shape
+        if reward_shape not in ((), (N,)):
+            raise ValueError(
+                f"Sequence rewards must be scalar or have shape ({N},); "
+                f"got {reward_shape}"
+            )
 
         obs_pad = np.zeros((batch_size, max_len, N, obs_dim), dtype=np.float32)
         ids_pad = np.zeros((batch_size, max_len, N, N), dtype=np.float32)
         act_pad = np.zeros((batch_size, max_len, N), dtype=np.int64)
-        rew_pad = np.zeros((batch_size, max_len), dtype=np.float32)
+        rew_pad = np.zeros((batch_size, max_len) + reward_shape, dtype=np.float32)
         next_obs_pad = np.zeros((batch_size, max_len, N, obs_dim), dtype=np.float32)
         done_pad = np.zeros((batch_size, max_len), dtype=np.float32)
         mask_pad = np.zeros((batch_size, max_len), dtype=np.float32)
@@ -104,7 +110,13 @@ class ReplayBuffer:
                 obs_pad[b, t] = trans[0]
                 ids_pad[b, t] = trans[1]
                 act_pad[b, t] = trans[2]
-                rew_pad[b, t] = trans[3]
+                reward = np.asarray(trans[3], dtype=np.float32)
+                if reward.shape != reward_shape:
+                    raise ValueError(
+                        f"Sequence reward shape changed within a batch: "
+                        f"expected {reward_shape}, got {reward.shape}"
+                    )
+                rew_pad[b, t] = reward
                 next_obs_pad[b, t] = trans[4]
                 done_pad[b, t] = float(trans[5])
                 mask_pad[b, t] = 1.0

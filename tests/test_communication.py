@@ -707,8 +707,20 @@ class TestC1ThroughC6Integration:
             assert agent.current_messages is not None
             assert agent.current_messages.shape == (N, cfg["num_messages"])
 
-    @pytest.mark.parametrize("condition", ["C1", "C2", "C3", "C4", "C5", "C6"])
-    def test_agent_training_step(self, condition):
+    @pytest.mark.parametrize(
+        "condition, per_agent_rewards",
+        [
+            ("C1", False),
+            ("C2", False),
+            ("C3", False),
+            ("C3", True),
+            ("C4", False),
+            ("C5", False),
+            ("C5", True),
+            ("C6", False),
+        ],
+    )
+    def test_agent_training_step(self, condition, per_agent_rewards):
         from agents.dqn import DQNAgent
         from agents.replay_buffer import ReplayBuffer
         from training.config import get_config
@@ -742,7 +754,8 @@ class TestC1ThroughC6Integration:
                 act = agent.select_actions(obs, epsilon=0.1, prev_messages=prev_m)
                 cur_m = agent.current_messages
                 next_obs = np.random.randn(N, obs_dim).astype(np.float32)
-                trans = (obs, eye, act, 1.0, next_obs, False, prev_m, cur_m)
+                reward = np.ones(N, dtype=np.float32) if per_agent_rewards else 1.0
+                trans = (obs, eye, act, reward, next_obs, False, prev_m, cur_m)
                 buffer.add(trans)
                 ep_trans.append(trans)
                 prev_m = cur_m
