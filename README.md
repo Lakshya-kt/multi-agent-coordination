@@ -1,5 +1,8 @@
 # Seeing vs. Saying: Multi-Agent Coordination
 
+For the current repository map, setup instructions, and detailed training,
+evaluation, and testing commands, see [RUNNING.md](RUNNING.md).
+
 ## Project Overview
 
 This project studies how observation range,
@@ -49,7 +52,7 @@ pip install -r requirements.txt
 python -m training.train
 ```
 
-## Final folder structure
+## Simplified folder structure
 
 ``` text
 multi-agent-coordination/
@@ -73,11 +76,13 @@ multi-agent-coordination/
 │
 ├── evaluation/
 │   ├── __init__.py
+│   ├── baselines.py
 │   ├── evaluate.py
 │   ├── metrics.py
-│   └── mutual_information.py
+│   ├── mutual_information.py
+│   ├── plots.py
+│   └── statistics.py
 │
-├── configs/
 ├── tests/
 │   ├── test_environment.py
 │   └── test_communication.py
@@ -86,4 +91,5 @@ multi-agent-coordination/
 ├── results/
 ├── requirements.txt
 ├── .gitignore
-└── README.md
+├── README.md
+└── RUNNING.md
