@@ -28,3 +28,6 @@ results/*
 *.log
 .coverage
 htmlcov/
+checkpoints_smoke/
+old_broken/
+results_smoke/
