@@ -125,7 +125,10 @@ class DQNAgent:
     """
     Parameter-shared multi-agent DQN controller for conditions C1 through C6.
     """
-
+    SEQ_WINDOW = 32        # training window length (steps)
+    SEQ_BURN_IN = 8        # leading steps of a mid-episode window excluded from the loss
+    SEQ_BATCH = 32         # max episodes per sequence update
+    SEQ_DOUBLE_DQN = True  # Double DQN target for C3/C5, same as the transition path
     def __init__(
         self,
         input_dim,
@@ -353,12 +356,12 @@ class DQNAgent:
         return float(loss.item())
 
     def _train_step_sequence(self, replay_buffer):
-        """Recurrent sequence/trajectory update for C3, C5."""
+        """Recurrent windowed sequence update for C3, C5."""
         min_eps = max(4, min(self.batch_size // 4, 16))
         if replay_buffer.num_episodes() < min_eps:
             return None
 
-        sample_b = min(self.batch_size, replay_buffer.num_episodes())
+        sample_b = min(self.batch_size, self.SEQ_BATCH, replay_buffer.num_episodes())
         (
             obs_b,
             ids_b,
@@ -371,71 +374,104 @@ class DQNAgent:
             next_msg_b,
         ) = replay_buffer.sample_sequences(sample_b)
 
+        dev = self.device
         B, L, N, obs_dim = obs_b.shape
 
-        obs_t = torch.as_tensor(obs_b, device=self.device)           # (B, L, N, obs_dim)
-        ids_t = torch.as_tensor(ids_b, device=self.device)           # (B, L, N, N)
-        act_t = torch.as_tensor(act_b, device=self.device)           # (B, L, N)
-        rew_t = torch.as_tensor(rew_b, device=self.device)           # (B, L) or (B, L, N)
-        next_obs_t = torch.as_tensor(next_obs_b, device=self.device) # (B, L, N, obs_dim)
-        done_t = torch.as_tensor(done_b, device=self.device)         # (B, L)
-        mask_t = torch.as_tensor(mask_b, device=self.device)         # (B, L)
+        obs_t = torch.as_tensor(obs_b, dtype=torch.float32, device=dev)            # (B, L, N, obs_dim)
+        ids_t = torch.as_tensor(ids_b, dtype=torch.float32, device=dev)            # (B, L, N, N)
+        act_t = torch.as_tensor(act_b, device=dev).long()                          # (B, L, N)
+        rew_t = torch.as_tensor(rew_b, dtype=torch.float32, device=dev)            # (B, L) or (B, L, N)
+        next_obs_t = torch.as_tensor(next_obs_b, dtype=torch.float32, device=dev)  # (B, L, N, obs_dim)
+        done_t = torch.as_tensor(done_b, dtype=torch.float32, device=dev)          # (B, L)
+        mask_t = torch.as_tensor(mask_b, dtype=torch.float32, device=dev)          # (B, L)
 
-        # Build sequence inputs
-        if self.comm_mode != "none" and prev_msg_b is not None:
-            prev_msg_t = torch.as_tensor(prev_msg_b, device=self.device) # (B, L, N, K)
-            next_msg_t = torch.as_tensor(next_msg_b, device=self.device) # (B, L, N, K)
+        use_comm = self.comm_mode != "none" and prev_msg_b is not None
+        if use_comm:
+            prev_msg_t = torch.as_tensor(prev_msg_b, dtype=torch.float32, device=dev)  # (B, L, N, K)
+            next_msg_t = torch.as_tensor(next_msg_b, dtype=torch.float32, device=dev)  # (B, L, N, K)
 
-            comm_steps = []
-            next_comm_steps = []
-            for l in range(L):
-                c_l = self._prepare_batch_comm(prev_msg_t[:, l], self.policy_net, B)
-                nc_l = self._prepare_batch_comm(next_msg_t[:, l], self.target_net, B)
-                comm_steps.append(c_l)
-                next_comm_steps.append(nc_l)
+        # ---- Per-episode random window (assumes mask is 1s then padding 0s) ----
+        W = min(self.SEQ_WINDOW, L)
+        burn_len = min(self.SEQ_BURN_IN, W // 2)
+        lengths = mask_t.sum(dim=1).long().clamp(min=1)                            # (B,)
+        max_start = (lengths - W).clamp(min=0)                                     # (B,)
+        starts = (torch.rand(B, device=dev) * (max_start + 1).float()).long()
+        starts = torch.minimum(starts, max_start)                                  # (B,)
 
-            # (L, B*N, comm_dim) -> (B*N, L, comm_dim)
-            comm_seq = torch.stack(comm_steps, dim=0).transpose(0, 1)
-            next_comm_seq = torch.stack(next_comm_steps, dim=0).transpose(0, 1)
+        steps = torch.arange(W, device=dev).unsqueeze(0)                           # (1, W)
+        raw_idx = starts.unsqueeze(1) + steps                                      # (B, W)
+        valid = (raw_idx < L).float()                                              # (B, W)
+        idx = raw_idx.clamp(max=L - 1)                                             # (B, W)
+        bidx = torch.arange(B, device=dev).unsqueeze(1)                            # (B, 1)
 
-            obs_flat = obs_t.permute(0, 2, 1, 3).reshape(B * N, L, obs_dim)
-            ids_flat = ids_t.permute(0, 2, 1, 3).reshape(B * N, L, N)
-            next_obs_flat = next_obs_t.permute(0, 2, 1, 3).reshape(B * N, L, obs_dim)
+        obs_t = obs_t[bidx, idx]                                                   # (B, W, N, obs_dim)
+        ids_t = ids_t[bidx, idx]
+        act_t = act_t[bidx, idx]
+        rew_t = rew_t[bidx, idx]
+        next_obs_t = next_obs_t[bidx, idx]
+        done_t = done_t[bidx, idx]
+        mask_t = mask_t[bidx, idx] * valid
+        if use_comm:
+            prev_msg_t = prev_msg_t[bidx, idx]                                     # (B, W, N, K)
+            next_msg_t = next_msg_t[bidx, idx]
 
+        # Burn-in only for windows that don't begin at the true episode start
+        if burn_len > 0:
+            burn = (starts > 0).unsqueeze(1) & (steps < burn_len)                  # (B, W)
+            mask_t = mask_t.masked_fill(burn, 0.0)
+
+        # ---- Build network inputs: (B*N, W, dim) ----
+        obs_flat = obs_t.permute(0, 2, 1, 3).reshape(B * N, W, obs_dim)
+        ids_flat = ids_t.permute(0, 2, 1, 3).reshape(B * N, W, N)
+        next_obs_flat = next_obs_t.permute(0, 2, 1, 3).reshape(B * N, W, obs_dim)
+
+        if use_comm:
+            K = prev_msg_t.shape[-1]
+            # One batched call over B*W instead of a Python loop over W
+            comm = self._prepare_batch_comm(
+                prev_msg_t.reshape(B * W, N, K), self.policy_net, B * W
+            )                                                                      # (B*W*N, D)
+            next_comm = self._prepare_batch_comm(
+                next_msg_t.reshape(B * W, N, K), self.target_net, B * W
+            )
+            D = comm.shape[-1]
+            comm_seq = comm.reshape(B, W, N, D).permute(0, 2, 1, 3).reshape(B * N, W, D)
+            next_comm_seq = next_comm.reshape(B, W, N, D).permute(0, 2, 1, 3).reshape(B * N, W, D)
             seq_in = torch.cat([obs_flat, ids_flat, comm_seq], dim=-1)
             next_seq_in = torch.cat([next_obs_flat, ids_flat, next_comm_seq], dim=-1)
         else:
-            obs_flat = obs_t.permute(0, 2, 1, 3).reshape(B * N, L, obs_dim)
-            ids_flat = ids_t.permute(0, 2, 1, 3).reshape(B * N, L, N)
-            next_obs_flat = next_obs_t.permute(0, 2, 1, 3).reshape(B * N, L, obs_dim)
-
             seq_in = torch.cat([obs_flat, ids_flat], dim=-1)
             next_seq_in = torch.cat([next_obs_flat, ids_flat], dim=-1)
 
-        # Unroll policy network (runs input_proj -> GRU memory -> Dueling Q-head)
-        q_seq, _, _ = self.policy_net(seq_in)                  # (B*N, L, num_actions)
+        # ---- Policy unroll ----
+        q_seq, _, _ = self.policy_net(seq_in)                                      # (B*N, W, A)
+        act_flat = act_t.permute(0, 2, 1).reshape(B * N, W)
+        q_taken = q_seq.gather(-1, act_flat.unsqueeze(-1)).squeeze(-1)             # (B*N, W)
 
-        act_flat = act_t.permute(0, 2, 1).reshape(B * N, L)    # (B*N, L)
-        q_taken = q_seq.gather(-1, act_flat.unsqueeze(-1)).squeeze(-1)  # (B*N, L)
+        # ---- Rewards / dones ----
+        if rew_t.ndim == 2:
+            rew_expanded = rew_t.unsqueeze(1).expand(B, N, W).reshape(B * N, W)
+        elif rew_t.ndim == 3 and rew_t.shape == (B, W, N):
+            rew_expanded = rew_t.permute(0, 2, 1).reshape(B * N, W)
+        else:
+            raise ValueError(
+                "Sequence rewards must have shape (B, L) or (B, L, N); "
+                f"got {tuple(rew_t.shape)}"
+            )
+        done_expanded = done_t.unsqueeze(1).expand(B, N, W).reshape(B * N, W)
 
-        # Target network unroll
+        # ---- Target ----
         with torch.no_grad():
             next_q_seq, _, _ = self.target_net(next_seq_in)
-            next_q_max = next_q_seq.max(dim=-1)[0]           # (B*N, L)
-
-            if rew_t.ndim == 2:
-                rew_expanded = rew_t.unsqueeze(1).expand(B, N, L).reshape(B * N, L)
-            elif rew_t.shape == (B, L, N):
-                rew_expanded = rew_t.permute(0, 2, 1).reshape(B * N, L)
+            if self.SEQ_DOUBLE_DQN:
+                next_pol_q, _, _ = self.policy_net(next_seq_in)
+                best_next = next_pol_q.argmax(dim=-1, keepdim=True)
+                next_q_max = next_q_seq.gather(-1, best_next).squeeze(-1)
             else:
-                raise ValueError(
-                    "Sequence rewards must have shape (B, L) or (B, L, N); "
-                    f"got {tuple(rew_t.shape)}"
-                )
-            done_expanded = done_t.unsqueeze(1).expand(B, N, L).reshape(B * N, L)
+                next_q_max = next_q_seq.max(dim=-1)[0]
             td_target = rew_expanded + self.gamma * (1.0 - done_expanded) * next_q_max
 
-        mask_flat = mask_t.unsqueeze(1).expand(B, N, L).reshape(B * N, L)
+        mask_flat = mask_t.unsqueeze(1).expand(B, N, W).reshape(B * N, W)
         td_error = (q_taken - td_target) ** 2
         loss = (td_error * mask_flat).sum() / mask_flat.sum().clamp(min=1.0)
 
@@ -445,7 +481,7 @@ class DQNAgent:
         self.optimizer.step()
 
         return float(loss.item())
-
+    
     def update_target_network(self):
         """Copy weights from policy network to target network."""
         self.target_net.load_state_dict(self.policy_net.state_dict())
