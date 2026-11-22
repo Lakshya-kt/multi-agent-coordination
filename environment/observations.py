@@ -28,7 +28,9 @@ def get_local_observations(agent_id, agent_position, target_position, grid_size,
     walls=np.zeros((G,G),np.float32)
     
     if radius=="full":
-        return np.stack([targets,others,walls])
+        self_channel = np.zeros((G, G), np.float32)
+        self_channel[y, x] = 1.0
+        return np.stack([targets, others, self_channel])
 
     ## pad so a window centred near an edge never goes out of bounds
     r=radius

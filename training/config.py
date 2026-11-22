@@ -21,7 +21,7 @@ CONFIG = {
 
     # DQN
     "hidden_dim": 128,
-    "learning_rate": 5e-4,
+    "learning_rate": 1e-3,
     "gamma": 0.99,
     "epsilon": 1.0,
     "epsilon_min": 0.05,
@@ -37,7 +37,7 @@ CONFIG = {
     "replay_capacity": 50000,
     "min_replay_size": 1000,
     "train_frequency": 4,
-    "target_update_frequency": 200,
+    "target_update_frequency": 250,
 
     # Logging & Checkpoints
     "log_interval": 200,

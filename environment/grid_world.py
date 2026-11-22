@@ -54,36 +54,28 @@ class GridWorld:
         return self.get_obs()  # Replace with the initial state of the environment
     
     def step(self, actions):
-        """
-        TODO:
-        1. Apply action for each agent to update their positions in the grid.
-        2. Ensure that agents do not move outside the grid boundaries.
-        3. Check if any agent has reached a target and update the state accordingly.
-        4. Increment the step count.
-        5. Return the new state of the environment, a reward signal, and a boolean indicating if the episode is done.
-        """
-        before=self.get_covered_targets()
-        
+        before = self.get_covered_targets()
+
         new_positions = self.agent_position + MOVES[np.asarray(actions)]
-        inside=((new_positions >= 0) & (new_positions < self.grid_size)).all(axis=1)
+        inside = ((new_positions >= 0) & (new_positions < self.grid_size)).all(axis=1)
         self.agent_position = np.where(inside[:, None], new_positions, self.agent_position)
-        
-        #increment step count
+
         self.step_count += 1
-        
-        #coverage after the move : C(s_t+1)
-        after=self.get_covered_targets()
-        
-        # Reward changes in simultaneous coverage, including losing coverage.
-        reward = after - before - 0.01
-        if after==self.num_targets:
-            reward+=5 #bonus for covering all targets
-        
-        ## episode end
-        terminated=(after==self.num_targets)
-        truncated=(not terminated) and self.step_count>=self.max_steps
-        info = {"covered": after, "success": bool(terminated),
-        "truncated": bool(truncated), "t": self.step_count}
+        after = self.get_covered_targets()
+
+        # Net coverage delta (symmetric: leaving a target loses 1.0)
+        reward = float(after - before) - 0.01
+        if after == self.num_targets:
+            reward += 5.0
+
+        terminated = (after == self.num_targets)
+        truncated = (not terminated) and self.step_count >= self.max_steps
+        info = {
+            "covered": after,
+            "success": bool(terminated),
+            "truncated": bool(truncated),
+            "t": self.step_count,
+        }
         return self.get_obs(), reward, terminated or truncated, info
     
     

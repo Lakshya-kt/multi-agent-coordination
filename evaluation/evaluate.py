@@ -480,12 +480,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.checkpoint is not None:
-        evaluate_checkpoint(
+        res = evaluate_checkpoint(
             checkpoint_path=args.checkpoint,
             num_episodes=args.episodes,
             results_dir=args.results_dir,
             eval_seed=args.eval_seed,
         )
+        print(f"[{res.get('condition')}] Evaluated over {res['num_episodes']} episodes:")
+        print(f" -> Success Rate: {res['success_rate']:.3f}")
+        print(f" -> Mean Completion Time: {res['mean_completion_time']:.2f} steps")
+        print(f" -> Mean Return: {res['mean_return']:.2f}")
     else:
         evaluate_conditions(
             checkpoints_dir=args.checkpoints_dir,

@@ -38,6 +38,28 @@ def _format_obs(raw_obs, env, num_agents):
         return arr
     return arr.reshape(num_agents, -1)
 
+def _per_agent_state(env):
+    """Return (on_target: (N,) float, min_dist_to_uncovered: (N,) float)."""
+    N = env.num_agents
+    targets = env.target_position
+    agents = env.agent_position
+
+    # Check which targets are currently occupied by at least one agent
+    occupied = set(tuple(p) for p in agents)
+    uncovered = np.array([t for t in targets if tuple(t) not in occupied])
+
+    on_target = np.zeros(N, dtype=np.float32)
+    min_dist = np.zeros(N, dtype=np.float32)
+    target_set = set(tuple(t) for t in targets)
+
+    for i in range(N):
+        pos_i = tuple(agents[i])
+        if pos_i in target_set:
+            on_target[i] = 1.0
+            min_dist[i] = 0.0
+        elif len(uncovered) > 0:
+            min_dist[i] = float(np.abs(uncovered - agents[i]).sum(axis=1).min())
+    return on_target, min_dist
 
 def train(cfg=None):
     if cfg is None:
@@ -117,6 +139,8 @@ def train(cfg=None):
             steps = 0
             success = 0
 
+            prev_on, prev_dist = _per_agent_state(env)
+
             for _ in range(cfg["max_steps"]):
                 steps += 1
                 global_step += 1
@@ -125,7 +149,6 @@ def train(cfg=None):
                 current_messages = agent.current_messages
                 step_out = env.step(actions)
 
-                # Support both 4-tuple (obs, reward, done, info) and 3-tuple (obs, reward, done)
                 if len(step_out) == 4:
                     raw_next_obs, reward, done, info = step_out
                 else:
@@ -133,13 +156,30 @@ def train(cfg=None):
                     info = {}
 
                 next_obs = _format_obs(raw_next_obs, env, cfg["num_agents"])
+
+
+                # Only zero out Bellman bootstrap on true task completion, not step-50 timeouts
+                terminated = bool(info.get("success", False)) if isinstance(info, dict) else False
+
+                curr_on, curr_dist = _per_agent_state(env)
+                # +1.0 for reaching target, -1.0 for leaving, +0.15 continuous holding reward, +0.15 distance progress
+                per_agent_rew = (
+                    1.0 * (curr_on - prev_on)
+                    + 0.15 * curr_on
+                    + 0.15 * (prev_dist - curr_dist)
+                    - 0.02
+                )
+                if terminated:
+                    per_agent_rew += 10.0
+                prev_on, prev_dist = curr_on, curr_dist
+
                 transition = (
                     obs,
                     eye_agents,
                     actions,
-                    float(reward),
+                    per_agent_rew,
                     next_obs,
-                    bool(done),
+                    terminated,
                     prev_messages,
                     current_messages,
                 )
@@ -169,13 +209,7 @@ def train(cfg=None):
                     agent.update_target_network()
 
                 if done:
-                    if isinstance(info, dict) and "success" in info:
-                        success = int(info["success"])
-                    else:
-                        try:
-                            success = int(env.get_covered_targets() == cfg["num_targets"])
-                        except Exception:
-                            success = 0
+                    success = int(terminated)
                     break
 
             if cfg.get("use_memory", False):
@@ -183,7 +217,10 @@ def train(cfg=None):
 
             agent.anneal_tau()
 
-            epsilon = max(cfg["epsilon_min"], epsilon * cfg["epsilon_decay"])
+            # Linear epsilon decay over 70% of training episodes
+            decay_steps = max(1, int(0.7 * cfg["num_episodes"]))
+            frac = min(1.0, ep / decay_steps)
+            epsilon = cfg["epsilon"] + frac * (cfg["epsilon_min"] - cfg["epsilon"])
             recent_returns.append(ep_return)
             recent_success.append(success)
 
@@ -197,7 +234,8 @@ def train(cfg=None):
                 avg_suc = np.mean(recent_success[-cfg["log_interval"] :])
                 print(
                     f"[{run_id}] Ep {ep}/{cfg['num_episodes']} | "
-                    f"Success: {avg_suc:.2f} | Return: {avg_ret:.2f} | Eps: {epsilon:.3f}"
+                    f"Success: {avg_suc:.2f} | Return: {avg_ret:.2f} | Eps: {epsilon:.3f}",
+                    flush=True,
                 )
 
     ckpt_path = os.path.join(cfg["checkpoint_dir"], f"{run_id}.pt")

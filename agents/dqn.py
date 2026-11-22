@@ -15,15 +15,6 @@ from agents.communication import (
 
 
 class DQN(nn.Module):
-    """
-    Parameter-shared multi-agent Q-network supporting:
-      - C1, C2: Flat observation + Agent ID -> 3-layer MLP -> Q-values
-      - C3:     Flat observation + Agent ID -> GRUMemory -> Q-values
-      - C4:     [Obs, ID, emb(m_{-i})] -> 3-layer MLP -> Q-values + MessageHead
-      - C5:     [Obs, ID, emb(m_{-i})] -> GRUMemory -> Q-values + MessageHead
-      - C6:     [Obs, ID, emb(m_{-i})] -> 3-layer MLP -> Q-values + RandomCommunication
-    """
-
     def __init__(
         self,
         input_dim,
@@ -43,7 +34,6 @@ class DQN(nn.Module):
         self.comm_mode = comm_mode
         self.num_messages = num_messages
 
-        # Teammate communication embedding (C4, C5, C6)
         if self.comm_mode in ("learned", "random"):
             self.comm_embed = MessageEmbedding(num_messages=num_messages, embed_dim=num_messages)
             comm_in_dim = (num_agents - 1) * num_messages
@@ -51,26 +41,47 @@ class DQN(nn.Module):
             self.comm_embed = None
             comm_in_dim = 0
 
-        # Total input dimension concatenating observation, agent ID, and communication
         self.total_input_dim = input_dim + num_agents + comm_in_dim
 
-        # Representation trunk: GRUMemory (C3, C5) or Feedforward MLP (C1, C2, C4, C6)
+        # Check if input_dim is 3 * W * W + 2 (spatial grid + 2-D pbar)
+        spatial_cells = input_dim - 2
+        w_cand = int(round((spatial_cells / 3.0) ** 0.5)) if spatial_cells > 0 else 0
+        if spatial_cells > 0 and 3 * w_cand * w_cand == spatial_cells:
+            self.grid_w = w_cand
+            self.conv = nn.Sequential(
+                nn.Conv2d(3, 16, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(16, 32, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.AdaptiveAvgPool2d((3, 3)),
+                nn.Flatten(),
+            )
+            flat_after_conv = 32 * 3 * 3 + 2 + num_agents + comm_in_dim
+        else:
+            self.grid_w = None
+            self.conv = None
+            flat_after_conv = self.total_input_dim
+
+        self.input_proj = nn.Sequential(
+            nn.Linear(flat_after_conv, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+        )
+
         if self.use_memory:
-            self.memory = GRUMemory(input_dim=self.total_input_dim, hidden_dim=hidden_dim)
+            self.memory = GRUMemory(input_dim=hidden_dim, hidden_dim=hidden_dim)
             self.feature_net = None
         else:
             self.memory = None
             self.feature_net = nn.Sequential(
-                nn.Linear(self.total_input_dim, hidden_dim),
-                nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.ReLU(),
             )
 
-        # Action Q-value head
-        self.q_head = nn.Linear(hidden_dim, num_actions)
+        # Dueling Q-head
+        self.val_head = nn.Linear(hidden_dim, 1)
+        self.adv_head = nn.Linear(hidden_dim, num_actions)
 
-        # Message generation head
         if self.comm_mode == "learned":
             self.msg_head = MessageHead(input_dim=hidden_dim, num_messages=num_messages)
         elif self.comm_mode == "random":
@@ -78,25 +89,32 @@ class DQN(nn.Module):
         else:
             self.msg_head = None
 
+    def _encode_input(self, x):
+        if self.conv is None:
+            return self.input_proj(x)
+        lead_shape = x.shape[:-1]
+        x_flat = x.reshape(-1, x.shape[-1])
+        grid_dim = 3 * self.grid_w * self.grid_w
+        grid = x_flat[:, :grid_dim].reshape(-1, 3, self.grid_w, self.grid_w)
+        rest = x_flat[:, grid_dim:]
+        conv_feat = self.conv(grid)
+        merged = torch.cat([conv_feat, rest], dim=-1).reshape(*lead_shape, -1)
+        return self.input_proj(merged)
+
+    def _compute_q(self, feat):
+        val = self.val_head(feat)
+        adv = self.adv_head(feat)
+        return val + (adv - adv.mean(dim=-1, keepdim=True))
+
     def forward(self, x, hidden_state=None):
-        """
-        Forward pass.
-        Args:
-            x: Input tensor of shape (B, total_input_dim) or (B, L, total_input_dim).
-            hidden_state: Optional initial GRU hidden state for recurrent models.
-        Returns:
-            If use_memory or hidden_state is passed:
-                q_values, feat, next_hidden
-            Else:
-                q_values (or tuple if comm is active)
-        """
+        h_in = self._encode_input(x)
         if self.use_memory:
-            feat, next_hidden = self.memory(x, hidden_state)
+            feat, next_hidden = self.memory(h_in, hidden_state)
         else:
-            feat = self.feature_net(x)
+            feat = self.feature_net(h_in)
             next_hidden = None
 
-        q_values = self.q_head(feat)
+        q_values = self._compute_q(feat)
 
         if self.use_memory or hidden_state is not None:
             return q_values, feat, next_hidden
@@ -228,7 +246,7 @@ class DQNAgent:
                     q_values, feat, _ = out
                 else:
                     q_values = out
-                    feat = self.policy_net.feature_net(net_in)
+                    feat = self.policy_net.feature_net(self.policy_net._encode_input(net_in))
 
             # Generate messages if communication is active
             if self.comm_mode != "none":
@@ -285,12 +303,12 @@ class DQNAgent:
         act_t = torch.as_tensor(act_b, device=self.device).reshape(B * N)
         next_obs_t = torch.as_tensor(next_obs_b, device=self.device).reshape(B * N, obs_dim)
 
-        rew_t = (
-            torch.as_tensor(rew_b, device=self.device)
-            .unsqueeze(1)
-            .expand(B, N)
-            .reshape(B * N)
-        )
+        rew_raw = torch.as_tensor(rew_b, dtype=torch.float32, device=self.device)
+        if rew_raw.ndim == 1:
+            rew_t = rew_raw.unsqueeze(1).expand(B, N).reshape(B * N)
+        else:
+            rew_t = rew_raw.reshape(B * N)
+
         done_t = (
             torch.as_tensor(done_b, device=self.device)
             .unsqueeze(1)
@@ -314,11 +332,15 @@ class DQNAgent:
         q_all = out[0] if isinstance(out, tuple) else out
         q_taken = q_all.gather(1, act_t.unsqueeze(1)).squeeze(1)
 
-        # Bellman target
+        # Double DQN Bellman target
         with torch.no_grad():
+            next_policy_out = self.policy_net(next_net_in)
+            next_policy_q = next_policy_out[0] if isinstance(next_policy_out, tuple) else next_policy_out
+            best_next_actions = next_policy_q.argmax(dim=1, keepdim=True)
+
             next_out = self.target_net(next_net_in)
             next_q_all = next_out[0] if isinstance(next_out, tuple) else next_out
-            next_q_max = next_q_all.max(dim=1)[0]
+            next_q_max = next_q_all.gather(1, best_next_actions).squeeze(1)
             td_target = rew_t + self.gamma * (1.0 - done_t) * next_q_max
 
         loss = F.mse_loss(q_taken, td_target)
@@ -390,18 +412,16 @@ class DQNAgent:
             seq_in = torch.cat([obs_flat, ids_flat], dim=-1)
             next_seq_in = torch.cat([next_obs_flat, ids_flat], dim=-1)
 
-        # Unroll policy network
-        h_seq, _ = self.policy_net.memory(seq_in)              # (B*N, L, hidden_dim)
-        q_seq = self.policy_net.q_head(h_seq)                  # (B*N, L, num_actions)
+        # Unroll policy network (runs input_proj -> GRU memory -> Dueling Q-head)
+        q_seq, _, _ = self.policy_net(seq_in)                  # (B*N, L, num_actions)
 
         act_flat = act_t.permute(0, 2, 1).reshape(B * N, L)    # (B*N, L)
         q_taken = q_seq.gather(-1, act_flat.unsqueeze(-1)).squeeze(-1)  # (B*N, L)
 
         # Target network unroll
         with torch.no_grad():
-            next_h_seq, _ = self.target_net.memory(next_seq_in)
-            next_q_seq = self.target_net.q_head(next_h_seq)
-            next_q_max = next_q_seq.max(dim=-1)[0]             # (B*N, L)
+            next_q_seq, _, _ = self.target_net(next_seq_in)
+            next_q_max = next_q_seq.max(dim=-1)[0]           # (B*N, L)
 
             rew_expanded = rew_t.unsqueeze(1).expand(B, N, L).reshape(B * N, L)
             done_expanded = done_t.unsqueeze(1).expand(B, N, L).reshape(B * N, L)
