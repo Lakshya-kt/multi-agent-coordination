@@ -14,7 +14,7 @@ checkpoints/*
 !checkpoints/.gitkeep
 
 # Experiment results
-results/*
+# results/*
 !results/.gitkeep
 
 # IDE
@@ -28,6 +28,3 @@ results/*
 *.log
 .coverage
 htmlcov/
-checkpoints_smoke/
-old_broken/
-results_smoke/
