@@ -9,13 +9,13 @@ venv/
 # Jupyter
 .ipynb_checkpoints/
 
-# Model checkpoints
-checkpoints/*
-!checkpoints/.gitkeep
+# # Model checkpoints
+# checkpoints/*
+# !checkpoints/.gitkeep
 
-# Experiment results
+# # Experiment results
 # results/*
-!results/.gitkeep
+# !results/.gitkeep
 
 # IDE
 .vscode/

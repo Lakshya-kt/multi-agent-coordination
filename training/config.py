@@ -51,9 +51,19 @@ CONFIG = {
 CONDITION_CONFIGS = {
     "C1": {"observation_radius": "full", "use_memory": False, "comm_mode": "none"},
     "C2": {"observation_radius": 2, "use_memory": False, "comm_mode": "none"},
-    "C3": {"observation_radius": 2, "use_memory": True, "comm_mode": "none"},
+    "C3": {
+        "observation_radius": 2,
+        "use_memory": True,
+        "comm_mode": "none",
+        "train_frequency": 16,
+    },
     "C4": {"observation_radius": 2, "use_memory": False, "comm_mode": "learned"},
-    "C5": {"observation_radius": 2, "use_memory": True, "comm_mode": "learned"},
+    "C5": {
+        "observation_radius": 2,
+        "use_memory": True,
+        "comm_mode": "learned",
+        "train_frequency": 16,
+    },
     "C6": {"observation_radius": 2, "use_memory": False, "comm_mode": "random"},
 }
 
