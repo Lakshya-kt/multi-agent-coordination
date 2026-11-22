@@ -1,0 +1,14 @@
+{
+  "run_id": "C5_r5_N4_seed1",
+  "condition": "C5",
+  "radius": 5,
+  "num_agents": 4,
+  "seed": 1,
+  "num_episodes": 200,
+  "success_rate": 0.015,
+  "mean_completion_time": 7.666666666666667,
+  "mean_return": 1.5313500000000015,
+  "mutual_information_bits": 0.02971090176240465,
+  "mi_ci_lower": 0.018569350140722817,
+  "mi_ci_upper": 0.054153100402900375
+}
